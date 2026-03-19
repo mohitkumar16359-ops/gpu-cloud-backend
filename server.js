@@ -188,12 +188,12 @@ app.post('/api/payments/verify', verifyFirebaseToken, async (req, res) => {
 // --- 7. ACTIVE RENTALS & BILLING ---
 
 // A. Get the user's current active rental
+// Fetch Renter's Active Session
 app.get('/api/rentals/active', verifyFirebaseToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT r.id as rental_id, r.start_time, m.id as machine_id, m.gpu_name, m.hourly_rate 
-       FROM rentals r 
-       JOIN machines m ON r.machine_id = m.id
+      `SELECT r.id as rental_id, r.start_time, m.id as machine_id, m.gpu_name, m.hourly_rate, m.connection_url 
+       FROM rentals r JOIN machines m ON r.machine_id = m.id
        WHERE r.renter_id = $1 AND r.end_time IS NULL LIMIT 1`,
       [req.user.uid]
     );
@@ -202,7 +202,16 @@ app.get('/api/rentals/active', verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ error: "Failed to fetch active rentals" });
   }
 });
-
+// NEW: Host Agent uploads the secure Ngrok URL
+app.post('/api/machines/set-url', async (req, res) => {
+  const { machine_id, url } = req.body;
+  try {
+    await pool.query(`UPDATE machines SET connection_url = $1 WHERE id = $2`, [url, machine_id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to save tunnel URL." });
+  }
+});
 // B. Stop the rental and calculate the bill
 app.post('/api/rentals/stop', verifyFirebaseToken, async (req, res) => {
   const { rental_id, machine_id } = req.body;
