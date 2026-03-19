@@ -75,18 +75,18 @@ app.post('/api/machines/register', async (req, res) => {
 });
 
 // --- 3. RENTER ROUTES (The Marketplace) ---
-// This sends the list of available GPUs to your website
+// Fetch Available Marketplace GPUs (Filters out disconnected/Ghost PCs)
 app.get('/api/machines', async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT id, gpu_name, vram_gb, hourly_rate 
-       FROM machines 
-       WHERE status = 'available' 
-       ORDER BY hourly_rate ASC`
-    );
+    const result = await pool.query(`
+      SELECT id, gpu_name, vram_gb, hourly_rate 
+      FROM machines 
+      WHERE status = 'available' 
+      AND last_heartbeat > NOW() - INTERVAL '2 minutes'
+      ORDER BY hourly_rate ASC
+    `);
     res.json(result.rows);
   } catch (error) {
-    console.error("\n❌ ERROR: Could not fetch marketplace data.", error);
     res.status(500).json({ error: "Failed to load machines" });
   }
 });
@@ -125,12 +125,14 @@ app.post('/api/rentals/start', verifyFirebaseToken, async (req, res) => {
   }
 });
 // --- 5. HOST AGENT STATUS CHECK ---
-// The Go Agent calls this to see if it got rented
+// Host Agent Checks if Rented & Sends Heartbeat
 app.get('/api/machines/:id/status', async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT status FROM machines WHERE id = $1`, [req.params.id]
-    );
+    // 1. Update the heartbeat timer to NOW
+    await pool.query(`UPDATE machines SET last_heartbeat = NOW() WHERE id = $1`, [req.params.id]);
+    
+    // 2. Fetch the current status
+    const result = await pool.query(`SELECT status FROM machines WHERE id = $1`, [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
     
     res.json({ status: result.rows[0].status });
@@ -213,46 +215,49 @@ app.post('/api/machines/set-url', async (req, res) => {
   }
 });
 // B. Stop the rental and calculate the bill
+// Renter Stops Session & Gets Billed + Host Gets Paid
 app.post('/api/rentals/stop', verifyFirebaseToken, async (req, res) => {
   const { rental_id, machine_id } = req.body;
-  const userId = req.user.uid;
-
+  const renterId = req.user.uid;
+  
   try {
-    // 1. Get the start time and the hourly rate
+    // Fetch the rental details AND the Host's ID
     const rentalData = await pool.query(
-      `SELECT r.start_time, m.hourly_rate FROM rentals r
-       JOIN machines m ON r.machine_id = m.id
+      `SELECT r.start_time, m.hourly_rate, m.host_id 
+       FROM rentals r JOIN machines m ON r.machine_id = m.id 
        WHERE r.id = $1 AND r.renter_id = $2`, 
-      [rental_id, userId]
+      [rental_id, renterId]
     );
-
     if (rentalData.rows.length === 0) return res.status(400).json({ error: "Rental not found." });
 
     const startTime = new Date(rentalData.rows[0].start_time);
     const hourlyRate = rentalData.rows[0].hourly_rate;
+    const hostId = rentalData.rows[0].host_id; // We found the Host!
+    
     const now = new Date();
-
-    // 2. Calculate the exact cost based on minutes used
     const durationMs = now - startTime;
     const minutesUsed = Math.ceil(durationMs / (1000 * 60));
-    const totalCost = (hourlyRate / 60) * minutesUsed;
+    
+    // Ensure at least 1 minute is charged to prevent zero-cost bugs
+    const actualMinutes = minutesUsed > 0 ? minutesUsed : 1; 
+    const totalCost = (hourlyRate / 60) * actualMinutes;
+    
+    // The Host gets 90% of the money
+    const hostPayout = totalCost * 0.90; 
 
-    // 3. Subtract the cost from the user's balance
-    await pool.query(
-      `UPDATE users SET credit_balance = credit_balance - $1 WHERE id = $2`,
-      [totalCost, userId]
-    );
-
-    // 4. Update the rental receipt and free the machine
+    // 1. Deduct from Renter
+    await pool.query(`UPDATE users SET credit_balance = credit_balance - $1 WHERE id = $2`, [totalCost, renterId]);
+    // 2. Add to Host
+    await pool.query(`UPDATE users SET credit_balance = credit_balance + $1 WHERE id = $2`, [hostPayout, hostId]);
+    // 3. Mark rental as finished
     await pool.query(`UPDATE rentals SET end_time = NOW(), total_cost = $1 WHERE id = $2`, [totalCost, rental_id]);
-    await pool.query(`UPDATE machines SET status = 'available' WHERE id = $1`, [machine_id]);
+    // 4. Free up the machine
+    await pool.query(`UPDATE machines SET status = 'available', connection_url = NULL WHERE id = $1`, [machine_id]);
 
-    console.log(`\n🛑 RENTAL ENDED: User charged ₹${totalCost.toFixed(2)} for ${minutesUsed} minutes.`);
-    res.json({ success: true, cost: totalCost, minutes: minutesUsed });
-
+    console.log(`\n🛑 RENTAL ENDED: Renter paid ₹${totalCost.toFixed(2)}. Host earned ₹${hostPayout.toFixed(2)}.`);
+    res.json({ success: true, cost: totalCost, minutes: actualMinutes });
   } catch (error) {
-    console.error("Error stopping rental:", error);
-    res.status(500).json({ error: "Failed to stop rental and process billing." });
+    res.status(500).json({ error: "Failed to process billing." });
   }
 });
 // C. Fetch Live User Balance
