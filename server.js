@@ -262,27 +262,19 @@ app.post('/api/rentals/stop', verifyFirebaseToken, async (req, res) => {
 });
 // DELETE: Remove a GPU from the live marketplace when the host stops or quits
 app.delete('/api/machines/:id', async (req, res) => {
-    const machineId = req.params.id;
+  const machineId = req.params.id;
 
-    try {
-        // Tell Supabase to delete the row where the ID matches
-        const { error } = await supabase
-            .from('machines')
-            .delete()
-            .eq('id', machineId);
+  try {
+    // Delete the machine using standard Postgres SQL
+    await pool.query(`DELETE FROM machines WHERE id = $1`, [machineId]);
 
-        if (error) {
-            console.error("Supabase deletion error:", error);
-            return res.status(500).json({ success: false, error: error.message });
-        }
-
-        console.log(`🗑️ GPU Machine ${machineId} removed from marketplace.`);
-        res.json({ success: true, message: "Machine removed from marketplace" });
-        
-    } catch (error) {
-        console.error("Error removing machine:", error);
-        res.status(500).json({ success: false, error: "Internal server error" });
-    }
+    console.log(`🗑️ GPU Machine ${machineId} removed from marketplace.`);
+    res.json({ success: true, message: "Machine removed from marketplace" });
+      
+  } catch (error) {
+    console.error("Error removing machine:", error);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
 });
 // C. Fetch Live User Balance
 app.get('/api/users/balance', verifyFirebaseToken, async (req, res) => {
