@@ -191,12 +191,14 @@ app.post('/api/payments/verify', verifyFirebaseToken, async (req, res) => {
 
 // A. Get the user's current active rental
 // Fetch Renter's Active Session
+// A. Get the user's current active rental
 app.get('/api/rentals/active', verifyFirebaseToken, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT r.id as rental_id, r.start_time, m.id as machine_id, m.gpu_name, m.hourly_rate, m.connection_url 
        FROM rentals r JOIN machines m ON r.machine_id = m.id
-       WHERE r.renter_id = $1 AND r.end_time IS NULL LIMIT 1`,
+       WHERE r.renter_id = $1 AND r.end_time IS NULL 
+       ORDER BY r.start_time DESC LIMIT 1`, // 🚨 FIX: Always grab the newest session!
       [req.user.uid]
     );
     res.json(result.rows[0] || null);
